@@ -6,11 +6,8 @@ name: pipeline
 
 on:
   push:
-    branches:
-      - '*'
-  pull_request:
-    branches:
-      - '*'
+    tags:
+      - 'v*'
 
 jobs:
   fmt:
@@ -94,7 +91,11 @@ jobs:
       id: meta
       uses: docker/metadata-action@v5
       with:
+        tags:
+          type=ref,event=tag
         images: ghcr.io/jkjell/swf/software
+        flavor:
+          latest=false 
 
     - name: Docker Login
       uses: docker/login-action@v3
@@ -106,7 +107,7 @@ jobs:
     - name: Setup Buildx
       uses: docker/setup-buildx-action@v3
       with:
-        platforms: linux/amd64,linux/arm64
+        platforms: linux/arm64
         install: true
         use: true
 
@@ -117,7 +118,7 @@ jobs:
         step: build-image
         attestations: "git github environment slsa"
         command: |
-          /bin/sh -c "docker buildx build --platform linux/amd64,linux/arm64 -t ${{ steps.meta.outputs.tags }} --push ."
+          /bin/sh -c "docker buildx build --platform linux/arm64 -t ${{ steps.meta.outputs.tags }} --push ."
     outputs:
       tags: ${{ steps.meta.outputs.tags }}
           
@@ -165,19 +166,26 @@ jobs:
       artifact-upload-name: trufflehog.json
       artifact-upload-path: trufflehog.json
 
-  verify:
-    needs: [ generate-sbom, secret-scan]
+  release:
+    needs: [ build-image ]
+    runs-on: ubuntu-latest
 
-    if: ${{ github.event_name == 'push' }}
-    uses: testifysec/witness-run-action/.github/workflows/witness.yml@reusable-workflow
-    with:
-      pull_request: ${{ github.event_name == 'pull_request' }}
-      step: verify 
-      pre-command-attestations: "git github environment"
-      attestations: "git github environment"
-      artifact-download: image.tar
-      pre-command: |
-        curl -sSfL https://github.com/in-toto/witness/releases/download/v0.6.0/witness_0.6.0_linux_amd64.tar.gz -o witness.tar.gz && \
-        tar -xzvf witness.tar.gz -C /usr/local/bin/ && rm ./witness.tar.gz
-      command: |
-        witness verify -p policy-signed.json -k swfpublic.pem -f /tmp/image.tar --enable-archivista -l debug
+    steps:
+      - name: Tailscale
+        uses: tailscale/github-action@v3
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+
+      - name: Setup python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13' 
+      
+      - name: Install rstuf-cli
+        run: pip3 install git+https://github.com/kairoaraujo/repository-service-tuf-cli.git@artifacts-verify
+
+      - name: rstuf artifact add
+        run: |
+          rstuf artifact add ${{ needs.build-image.outputs.tags }} --api-server http://rstuf-rstuf-rstuf-api
